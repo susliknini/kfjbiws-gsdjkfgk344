@@ -4,7 +4,6 @@ import logging
 from typing import Dict, Any, List
 from datetime import datetime
 
-# Импорты aiogram
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -12,49 +11,39 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# Импорты Telethon
 from telethon import TelegramClient
-from telethon.errors import (
-    SessionPasswordNeededError,  # Изменено с SessionPasswordNeeded
-    PhoneCodeInvalidError        # Изменено с PhoneCodeInvalid
-)
+from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
 from telethon.tl.functions.messages import GetHistoryRequest
 from telethon.tl.types import MessageService
+from telethon import events
 
-# Импорты для DeepSeek
 import aiohttp
 import json
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Конфигурация (замените на свои значения)
-BOT_TOKEN = "8218868922:AAED40palWhHPhqcb3NgjdlHUHGty5tY360"  # Получите у @BotFather
-API_ID = 13689314                  # Получите на my.telegram.org
-API_HASH = "809d211f8457b863286b8a8c58977b1b"    # Получите на my.telegram.org
-DEEPSEEK_API_KEY = "sk-b290a4dd2feb43979f19a3602a20de93"  # Получите на platform.deepseek.com
+BOT_TOKEN = "8218868922:AAED40palWhHPhqcb3NgjdlHUHGty5tY360"
+API_ID = 13689314
+API_HASH = "809d211f8457b863286b8a8c58977b1b"
+DEEPSEEK_API_KEY = "sk-b290a4dd2feb43979f19a3602a20de93"
 
-# ID администраторов (замените на свои)
 ADMIN_IDS = [7246667404, 987654321]
 
-# Глобальные переменные
 user_sessions = {}
 active_userbots = {}
 user_phones = {}
+active_chats = {}
 
-# Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Состояния для FSM
 class AuthStates(StatesGroup):
     waiting_for_phone = State()
     waiting_for_code = State()
     waiting_for_password = State()
 
-# Класс для управления сессиями пользователей
 class UserSession:
     def __init__(self, user_id: int):
         self.user_id = user_id
@@ -64,11 +53,9 @@ class UserSession:
         self.is_authenticated = False
         self.session_name = f"sessions/session_{user_id}"
         
-        # Создаем папку для сессий, если её нет
         os.makedirs("sessions", exist_ok=True)
     
     async def send_code(self, phone: str):
-        """Отправка кода подтверждения на телефон"""
         self.phone = phone
         self.client = TelegramClient(self.session_name, API_ID, API_HASH)
         await self.client.connect()
@@ -78,7 +65,6 @@ class UserSession:
         return True
     
     async def sign_in(self, code: str):
-        """Авторизация с кодом из SMS"""
         try:
             await self.client.sign_in(
                 phone=self.phone,
@@ -87,15 +73,14 @@ class UserSession:
             )
             self.is_authenticated = True
             return True, None
-        except SessionPasswordNeeded:
+        except SessionPasswordNeededError:
             return False, "password"
-        except PhoneCodeInvalid:
+        except PhoneCodeInvalidError:
             return False, "invalid_code"
         except Exception as e:
             return False, str(e)
     
     async def sign_in_with_password(self, password: str):
-        """Авторизация с двухфакторной аутентификацией"""
         try:
             await self.client.sign_in(password=password)
             self.is_authenticated = True
@@ -104,25 +89,21 @@ class UserSession:
             return False, str(e)
     
     async def disconnect(self):
-        """Отключение клиента"""
         if self.client:
             await self.client.disconnect()
             self.client = None
 
-# Класс для работы с DeepSeek API
 class DeepSeekAPI:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.api_url = "https://api.deepseek.com/v1/chat/completions"
     
     async def generate_response(self, message: str, context: List[Dict] = None) -> str:
-        """Генерация ответа с помощью DeepSeek"""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         
-        # Формируем промпт в стиле "Суслика"
         system_prompt = """Ты - Суслик, весёлый и немного грубоватый бот в Telegram-чате.
 Тебе не нравится слово "че" - ты всегда исправляешь его на "чо".
 Если кто-то использует неправильные формы слов или делает ошибки, ты можешь материться, но в шутливой форме.
@@ -136,11 +117,9 @@ class DeepSeekAPI:
             {"role": "system", "content": system_prompt},
         ]
         
-        # Добавляем контекст, если он есть
         if context:
             messages.extend(context)
         
-        # Добавляем текущее сообщение
         messages.append({"role": "user", "content": message})
         
         payload = {
@@ -163,10 +142,8 @@ class DeepSeekAPI:
             logger.error(f"DeepSeek API error: {e}")
             return "У меня лапки... Давай попробуем еще раз?"
 
-# Инициализация DeepSeek
 deepseek = DeepSeekAPI(DEEPSEEK_API_KEY)
 
-# Обработчики команд для бота-авторизации
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -196,19 +173,16 @@ async def connect_bot(callback: types.CallbackQuery, state: FSMContext):
 async def process_phone(message: types.Message, state: FSMContext):
     phone = message.text.strip()
     
-    # Простая валидация номера
     if not phone.startswith('+') or not phone[1:].isdigit() or len(phone) < 10:
         await message.answer("❌ Неверный формат номера. Попробуйте еще раз (например: +79123456789):")
         return
     
     user_id = message.from_user.id
     
-    # Создаем сессию пользователя
     user_session = UserSession(user_id)
     user_sessions[user_id] = user_session
     
     try:
-        # Отправляем код
         await user_session.send_code(phone)
         user_phones[user_id] = phone
         
@@ -236,7 +210,6 @@ async def process_code(message: types.Message, state: FSMContext):
         if success:
             await message.answer("✅ Авторизация успешна! Бот запущен.")
             
-            # Запускаем userbot в фоновом режиме
             asyncio.create_task(run_userbot(user_session.client, user_id))
             
             active_userbots[user_id] = user_session
@@ -269,7 +242,6 @@ async def process_password(message: types.Message, state: FSMContext):
         if success:
             await message.answer("✅ Авторизация успешна! Бот запущен.")
             
-            # Запускаем userbot в фоновом режиме
             asyncio.create_task(run_userbot(user_session.client, user_id))
             
             active_userbots[user_id] = user_session
@@ -281,18 +253,13 @@ async def process_password(message: types.Message, state: FSMContext):
         await message.answer(f"❌ Ошибка: {str(e)}")
         await state.clear()
 
-# Функция для запуска userbot
 async def run_userbot(client, user_id):
-    """Запуск userbot для прослушивания сообщений"""
     @client.on(events.NewMessage)
     async def handler(event):
-        # Игнорируем служебные сообщения и собственные сообщения
         if isinstance(event.message, MessageService) or event.message.out:
             return
         
-        # Проверяем команду .ss для активации
         if event.message.text and event.message.text.startswith('.ss'):
-            # Активируем бота в этом чате
             chat_id = event.chat_id
             if user_id not in active_chats:
                 active_chats[user_id] = set()
@@ -301,9 +268,7 @@ async def run_userbot(client, user_id):
             await event.reply("Суслик активирован! 🐹")
             return
         
-        # Проверяем, активирован ли бот в этом чате
         if user_id in active_chats and event.chat_id in active_chats[user_id]:
-            # Исправляем "че" на "чо"
             message_text = event.message.text
             if message_text:
                 if " че " in message_text.lower() or message_text.lower().startswith("че "):
@@ -311,20 +276,13 @@ async def run_userbot(client, user_id):
                     await event.reply(f"Исправляю: {corrected_text}")
                     return
             
-            # Генерируем ответ с помощью DeepSeek
             response = await deepseek.generate_response(message_text)
             
-            # Отправляем ответ
             await event.reply(response)
     
-    # Запускаем клиент
     await client.start()
     await client.run_until_disconnected()
 
-# Глобальные переменные для активных чатов
-active_chats = {}
-
-# Запуск бота
 async def main():
     logger.info("Бот запущен!")
     await dp.start_polling(bot)
