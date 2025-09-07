@@ -2,7 +2,8 @@ import os
 import asyncio
 import logging
 import random
-from typing import Dict, Any, List
+import aiohttp
+import json
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -16,15 +17,12 @@ from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
 from telethon.tl.types import MessageService
 from telethon import events
 
-import aiohttp
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = "8218868922:AAED40palWhHPhqcb3NgjdlHUHGty5tY360"
 API_ID = 13689314
 API_HASH = "809d211f8457b863286b8a8c58977b1b"
-DEEPSEEK_API_KEY = "sk-b290a4dd2feb43979f19a3602a20de93"
 
 ADMIN_IDS = [7246667404]
 
@@ -41,6 +39,145 @@ class AuthStates(StatesGroup):
     waiting_for_phone = State()
     waiting_for_code = State()
     waiting_for_password = State()
+
+class HuggingFaceAPI:
+    def __init__(self):
+        self.models = [
+            "microsoft/DialoGPT-medium",
+            "tinkoff-ai/ruDialoGPT-medium", 
+            "microsoft/DialoGPT-small"
+        ]
+        self.current_model_index = 0
+        self.fallback_responses = {
+            "че": [
+                "Опять это 'че'! Говори 'чо', будь человеком! 😠",
+                'Чё? "Чо" надо говорить! 🤬',
+                "Исправляю: чо... Всегда это 'че' достало! 😤",
+                "Че? Серьезно? Говори 'чо', балбес! 🤦‍♂️"
+            ],
+            "суслик": [
+                "Чо надо? Я занят! 🐹",
+                "Суслик на связи! Чо там? 😎",
+                "Меня звали? Я тут! 🐭",
+                "А? Кто? Я? Ну чо? 🤔",
+                "Да-да, я здесь, чо хотел? 🦫"
+            ],
+            "привет": [
+                "Ну привет, чо 😏",
+                "Здарова, чо как? 👋", 
+                "Приветствую, смертный! 😈",
+                "О, привет! Чо нового? 🐿️"
+            ],
+            "как дела": [
+                "Да нормально, чо ты спрашиваешь? А у тебя? 🐹",
+                "Пока не сдох, чо 😅",
+                "Лучше всех, чо еще! 🎉",
+                "Отлично! Чо у тебя? 🌟"
+            ],
+            "default": [
+                "Интересно... 🤔",
+                "Ну это ты загнул! 😂",
+                "Чо? Серьезно? 😲",
+                "Я бы поспорил, но лень... 😴",
+                "Хм, а ты не дурак! 👍",
+                "Это пипец как интересно... 🧐",
+                "Чо-то я не понял... Объясни? 🤷",
+                "Ахаха, хорош! 😄",
+                "Ну ты даешь! 😅",
+                "Чо-то скучно... Развлеки меня! 🎭",
+                "Мда... 🤨",
+                "Ну и чо? 🐿️",
+                "Продолжай, я слушаю... 👂",
+                "Блин, я проголодался... 🥜",
+                "Чо-то устал я сегодня... 😪"
+            ]
+        }
+    
+    def get_current_model(self):
+        return self.models[self.current_model_index]
+    
+    def switch_model(self):
+        self.current_model_index = (self.current_model_index + 1) % len(self.models)
+        logger.info(f"Переключились на модель: {self.get_current_model()}")
+    
+    async def generate_response(self, message: str) -> str:
+        message_lower = message.lower()
+        
+        # Приоритетные ответы
+        if " че " in message_lower or message_lower.startswith("че "):
+            return random.choice(self.fallback_responses["че"])
+        
+        if "суслик" in message_lower:
+            return random.choice(self.fallback_responses["суслик"])
+        
+        if "привет" in message_lower:
+            return random.choice(self.fallback_responses["привет"])
+        
+        if "как дела" in message_lower or "как ты" in message_lower:
+            return random.choice(self.fallback_responses["как дела"])
+        
+        # Пробуем получить ответ от Hugging Face API
+        try:
+            api_url = f"https://api-inference.huggingface.co/models/{self.get_current_model()}"
+            
+            # Формируем промпт в стиле Суслика
+            prompt = f"""Ты - Суслик, весёлый и немного грубоватый бот в Telegram-чате.
+Тебе не нравится слово "че" - ты всегда исправляешь его на "чо".
+Твой стиль общения: неформальный, дружелюбный, с юмором, иногда с сарказмом.
+Отвечай кратко и естественно, как в обычном чате.
+
+Человек: {message}
+Суслик:"""
+            
+            payload = {
+                "inputs": prompt,
+                "parameters": {
+                    "max_length": 80,
+                    "temperature": 0.9,
+                    "do_sample": True,
+                    "top_p": 0.9,
+                    "repetition_penalty": 1.1,
+                    "return_full_text": False
+                }
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    api_url, 
+                    json=payload, 
+                    timeout=8
+                ) as response:
+                    
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        if isinstance(data, list) and len(data) > 0:
+                            generated_text = data[0].get('generated_text', '')
+                            
+                            # Очищаем ответ
+                            if generated_text:
+                                # Убираем повторения промпта
+                                response_text = generated_text.replace(prompt, '').strip()
+                                
+                                # Убираем лишние символы
+                                response_text = response_text.split('\n')[0].split('Человек:')[0].strip()
+                                
+                                if response_text and len(response_text) > 3:
+                                    # Исправляем "че" на "чо" в ответе
+                                    response_text = response_text.replace(' че ', ' чо ').replace('Че ', 'Чо ')
+                                    return response_text
+                    
+                    # Если что-то пошло не так, пробуем другую модель
+                    self.switch_model()
+                    return random.choice(self.fallback_responses["default"])
+                    
+        except Exception as e:
+            logger.error(f"HuggingFace API error: {e}")
+            self.switch_model()
+            return random.choice(self.fallback_responses["default"])
+
+# Инициализируем генератор ответов
+response_generator = HuggingFaceAPI()
 
 class UserSession:
     def __init__(self, user_id: int):
@@ -90,53 +227,6 @@ class UserSession:
         if self.client:
             await self.client.disconnect()
             self.client = None
-
-class DeepSeekAPI:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.api_url = "https://api.deepseek.com/chat/completions"
-    
-    async def generate_response(self, message: str) -> str:
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        system_prompt = """Ты - Суслик, весёлый и немного грубоватый бот в Telegram-чате.
-Тебе не нравится слово "че" - ты всегда исправляешь его на "чо".
-Если кто-то использует неправильные формы слов или делает ошибки, ты можешь материться, но в шутливой форме.
-Ты уважаешь всех участников чата и часто хвалишь их.
-Твой стиль общения: неформальный, дружелюбный, с юмором, иногда с сарказмом.
-Отвечай кратко и естественно, как в обычном чате.
-Не пиши слишком длинные сообщения.
-Всегда отвечай от своего имени."""
-
-        payload = {
-            "model": "deepseek-chat",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": message}
-            ],
-            "temperature": 0.7,
-            "max_tokens": 150,
-            "stream": False
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.api_url, json=payload, headers=headers) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return data['choices'][0]['message']['content'].strip()
-                    else:
-                        error_text = await response.text()
-                        logger.error(f"DeepSeek API error: {response.status} - {error_text}")
-                        return "Чё-то я туплю... Напиши еще раз, а?"
-        except Exception as e:
-            logger.error(f"DeepSeek API connection error: {e}")
-            return "У меня лапки... Давай попробуем еще раз?"
-
-deepseek = DeepSeekAPI(DEEPSEEK_API_KEY)
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -274,15 +364,15 @@ async def run_userbot(client, user_id):
             await event.reply(f"Исправляю: {corrected_text}")
             return
         
-        # Отвечаем если упоминают суслика
+        # Отвечаем если упоминают суслика (всегда)
         if "суслик" in message_text.lower():
-            response = await deepseek.generate_response(message_text)
+            response = await response_generator.generate_response(message_text)
             await event.reply(response)
             return
         
-        # Случайные ответы (каждое 5-10 сообщение)
-        if random.randint(1, 8) == 1:  # 12.5% шанс ответа
-            response = await deepseek.generate_response(message_text)
+        # Случайные ответы (каждое 3-7 сообщение)
+        if random.randint(1, 5) == 1:
+            response = await response_generator.generate_response(message_text)
             await event.reply(response)
     
     try:
