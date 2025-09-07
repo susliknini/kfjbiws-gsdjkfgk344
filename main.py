@@ -1,8 +1,8 @@
 import os
 import asyncio
 import logging
+import random
 from typing import Dict, Any, List
-from datetime import datetime
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -13,12 +13,10 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
-from telethon.tl.functions.messages import GetHistoryRequest
 from telethon.tl.types import MessageService
 from telethon import events
 
 import aiohttp
-import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,7 +26,7 @@ API_ID = 13689314
 API_HASH = "809d211f8457b863286b8a8c58977b1b"
 DEEPSEEK_API_KEY = "sk-b290a4dd2feb43979f19a3602a20de93"
 
-ADMIN_IDS = [7246667404, 987654321]
+ADMIN_IDS = [123456789]
 
 user_sessions = {}
 active_userbots = {}
@@ -96,9 +94,9 @@ class UserSession:
 class DeepSeekAPI:
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.api_url = "https://api.deepseek.com/v1/chat/completions"
+        self.api_url = "https://api.deepseek.com/chat/completions"
     
-    async def generate_response(self, message: str, context: List[Dict] = None) -> str:
+    async def generate_response(self, message: str) -> str:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
@@ -113,18 +111,12 @@ class DeepSeekAPI:
 Не пиши слишком длинные сообщения.
 Всегда отвечай от своего имени."""
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-        ]
-        
-        if context:
-            messages.extend(context)
-        
-        messages.append({"role": "user", "content": message})
-        
         payload = {
             "model": "deepseek-chat",
-            "messages": messages,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": message}
+            ],
             "temperature": 0.7,
             "max_tokens": 150,
             "stream": False
@@ -137,9 +129,11 @@ class DeepSeekAPI:
                         data = await response.json()
                         return data['choices'][0]['message']['content'].strip()
                     else:
+                        error_text = await response.text()
+                        logger.error(f"DeepSeek API error: {response.status} - {error_text}")
                         return "Чё-то я туплю... Напиши еще раз, а?"
         except Exception as e:
-            logger.error(f"DeepSeek API error: {e}")
+            logger.error(f"DeepSeek API connection error: {e}")
             return "У меня лапки... Давай попробуем еще раз?"
 
 deepseek = DeepSeekAPI(DEEPSEEK_API_KEY)
@@ -259,29 +253,44 @@ async def run_userbot(client, user_id):
         if isinstance(event.message, MessageService) or event.message.out:
             return
         
-        if event.message.text and event.message.text.startswith('.ss'):
-            chat_id = event.chat_id
+        message_text = event.message.text or ""
+        chat_id = event.chat_id
+        
+        # Активация по команде .ss
+        if message_text.startswith('.ss'):
             if user_id not in active_chats:
                 active_chats[user_id] = set()
             active_chats[user_id].add(chat_id)
-            
             await event.reply("Суслик активирован! 🐹")
             return
         
-        if user_id in active_chats and event.chat_id in active_chats[user_id]:
-            message_text = event.message.text
-            if message_text:
-                if " че " in message_text.lower() or message_text.lower().startswith("че "):
-                    corrected_text = message_text.lower().replace(" че ", " чо ").replace("че ", "чо ")
-                    await event.reply(f"Исправляю: {corrected_text}")
-                    return
-            
+        # Проверяем, активирован ли бот в этом чате
+        if user_id not in active_chats or chat_id not in active_chats[user_id]:
+            return
+        
+        # Исправляем "че" на "чо"
+        if " че " in message_text.lower() or message_text.lower().startswith("че "):
+            corrected_text = message_text.lower().replace(" че ", " чо ").replace("че ", "чо ")
+            await event.reply(f"Исправляю: {corrected_text}")
+            return
+        
+        # Отвечаем если упоминают суслика
+        if "суслик" in message_text.lower():
             response = await deepseek.generate_response(message_text)
-            
+            await event.reply(response)
+            return
+        
+        # Случайные ответы (каждое 5-10 сообщение)
+        if random.randint(1, 8) == 1:  # 12.5% шанс ответа
+            response = await deepseek.generate_response(message_text)
             await event.reply(response)
     
-    await client.start()
-    await client.run_until_disconnected()
+    try:
+        await client.start()
+        logger.info(f"Userbot для пользователя {user_id} запущен")
+        await client.run_until_disconnected()
+    except Exception as e:
+        logger.error(f"Ошибка в userbot: {e}")
 
 async def main():
     logger.info("Бот запущен!")
