@@ -14,7 +14,10 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # Импорты Telethon
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeeded, PhoneCodeInvalid
+from telethon.errors import (
+    SessionPasswordNeededError,  # Изменено с SessionPasswordNeeded
+    PhoneCodeInvalidError        # Изменено с PhoneCodeInvalid
+)
 from telethon.tl.functions.messages import GetHistoryRequest
 from telethon.tl.types import MessageService
 
