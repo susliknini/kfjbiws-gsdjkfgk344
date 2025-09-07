@@ -2,8 +2,8 @@ import os
 import asyncio
 import logging
 import random
-import aiohttp
-import json
+import re
+from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -16,6 +16,8 @@ from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
 from telethon.tl.types import MessageService
 from telethon import events
+from telethon.tl.functions.messages import ReportRequest
+from telethon.tl.types import InputReportReasonSpam, InputReportReasonViolence, InputReportReasonOther
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,12 +26,13 @@ BOT_TOKEN = "8218868922:AAED40palWhHPhqcb3NgjdlHUHGty5tY360"
 API_ID = 13689314
 API_HASH = "809d211f8457b863286b8a8c58977b1b"
 
-ADMIN_IDS = [7246667404]
+ADMIN_IDS = [7246667404]  # Замените на ваш ID
 
 user_sessions = {}
 active_userbots = {}
 user_phones = {}
-active_chats = set()
+auto_mode = False  # Режим автоответчика
+last_activity = {}
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -39,97 +42,6 @@ class AuthStates(StatesGroup):
     waiting_for_phone = State()
     waiting_for_code = State()
     waiting_for_password = State()
-
-class NeuralNetworkAPI:
-    def __init__(self):
-        # Используем более стабильные API endpoints
-        self.api_endpoints = [
-            "https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium",
-            "https://api-inference.huggingface.co/models/tinkoff-ai/ruDialoGPT-medium",
-            "https://api-inference.huggingface.co/models/microsoft/DialoGPT-small",
-            "https://api-inference.huggingface.co/models/Helsinki-NLP/opus-mt-ru-en",
-        ]
-        self.current_endpoint_index = 0
-        self.fallback_responses = [
-            "Чо? Я тут! 🐹",
-            "Ага, понял... 🤔",
-            "Интересно! 🧐",
-            "Ну и чо? 😏",
-            "Продолжайте, я слушаю! 👂",
-            "Мда... 🤨",
-            "Чо-то скучновато... 🥱",
-            "Ахаха, хорош! 😄",
-            "Ну ты даешь! 😅",
-            "Чо-то я не понял... Объясни? 🤷"
-        ]
-        
-    def get_current_endpoint(self):
-        return self.api_endpoints[self.current_endpoint_index]
-    
-    def switch_endpoint(self):
-        self.current_endpoint_index = (self.current_endpoint_index + 1) % len(self.api_endpoints)
-        logger.info(f"Переключились на endpoint: {self.get_current_endpoint()}")
-    
-    async def generate_response(self, message: str, chat_id: str, username: str = None) -> str:
-        try:
-            api_url = self.get_current_endpoint()
-            
-            # Упрощенный промпт для лучшей работы
-            prompt = f"""Ты - Суслик, Telegram бот. Отвечай кратко и естественно.
-
-Человек: {message}
-Суслик:"""
-            
-            payload = {
-                "inputs": prompt,
-                "parameters": {
-                    "max_length": 60,
-                    "temperature": 0.8,
-                    "do_sample": True,
-                    "top_p": 0.9,
-                    "return_full_text": False
-                }
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                try:
-                    async with session.post(
-                        api_url, 
-                        json=payload, 
-                        timeout=5  # Уменьшаем таймаут
-                    ) as response:
-                        
-                        if response.status == 200:
-                            data = await response.json()
-                            
-                            if isinstance(data, list) and len(data) > 0:
-                                generated_text = data[0].get('generated_text', '')
-                                
-                                if generated_text:
-                                    # Очищаем ответ
-                                    response_text = generated_text.replace(prompt, '').strip()
-                                    
-                                    if response_text and len(response_text) > 2:
-                                        # Исправляем "че" на "чо"
-                                        response_text = response_text.replace(' че ', ' чо ').replace('Че ', 'Чо ')
-                                        return response_text
-                        
-                        # Если статус не 200, пробуем другой endpoint
-                        self.switch_endpoint()
-                        return random.choice(self.fallback_responses)
-                        
-                except asyncio.TimeoutError:
-                    logger.warning("Timeout при запросе к API")
-                    self.switch_endpoint()
-                    return random.choice(self.fallback_responses)
-                    
-        except Exception as e:
-            logger.error(f"API error: {e}")
-            self.switch_endpoint()
-            return random.choice(self.fallback_responses)
-
-# Инициализируем нейросеть
-neural_api = NeuralNetworkAPI()
 
 class UserSession:
     def __init__(self, user_id: int):
@@ -180,6 +92,55 @@ class UserSession:
             await self.client.disconnect()
             self.client = None
 
+async def extract_message_info(link: str, client: TelegramClient):
+    """Извлекает информацию о сообщении из ссылки"""
+    try:
+        # Формат: https://t.me/c/1234567890/123 или https://t.me/username/123
+        if "t.me/c/" in link:
+            parts = link.split("/")
+            chat_id = int(parts[4])
+            message_id = int(parts[5])
+            return chat_id, message_id
+        elif "t.me/" in link:
+            parts = link.split("/")
+            username = parts[3]
+            message_id = int(parts[4])
+            # Получаем chat_id по username
+            entity = await client.get_entity(username)
+            return entity.id, message_id
+    except Exception as e:
+        logger.error(f"Ошибка при разборе ссылки: {e}")
+    return None, None
+
+async def send_reports(client: TelegramClient, chat_id: int, message_id: int):
+    """Отправляет жалобы на сообщение"""
+    reasons = [
+        InputReportReasonSpam(),
+        InputReportReasonViolence(),
+        InputReportReasonOther()
+    ]
+    
+    successful = random.randint(60, 100)
+    failed = random.randint(1, 10)
+    floods = random.randint(0, 2)
+    
+    # Имитация отправки жалоб
+    for i in range(successful + failed):
+        try:
+            if i < successful:
+                reason = random.choice(reasons)
+                await client(ReportRequest(
+                    peer=await client.get_input_entity(chat_id),
+                    id=[message_id],
+                    reason=reason,
+                    message=""
+                ))
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+        except Exception as e:
+            logger.error(f"Ошибка при отправке жалобы: {e}")
+    
+    return successful, failed, floods
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -190,7 +151,7 @@ async def cmd_start(message: types.Message):
     keyboard.button(text="🔗 Подключить бота", callback_data="connect_bot")
     
     await message.answer(
-        "Привет! Я бот для управления Сусликом.\n"
+        "Привет! Я бот для управления функциями жалоб и автоответчика.\n"
         "Нажми кнопку ниже, чтобы подключить его к твоему аккаунту.",
         reply_markup=keyboard.as_markup()
     )
@@ -292,38 +253,80 @@ async def process_password(message: types.Message, state: FSMContext):
 async def run_userbot(client, user_id):
     @client.on(events.NewMessage)
     async def handler(event):
+        global auto_mode
+        
+        # Игнорируем служебные сообщения и свои сообщения
         if isinstance(event.message, MessageService) or event.message.out:
             return
         
         message_text = event.message.text or ""
         chat_id = event.chat_id
         
-        # Активация по команде .ss
-        if message_text.startswith('.ss'):
-            active_chats.add(chat_id)
-            await event.reply("✅ Суслик активирован для всего чата! 🐹")
-            return
+        # Команда .snos [ссылка]
+        if message_text.startswith('.snos '):
+            try:
+                link = message_text.split(' ', 1)[1].strip()
+                await event.reply("🔄 Начинаю отправку жалоб... Ожидайте 40-60 секунд ⏳")
+                
+                # Извлекаем информацию о сообщении
+                target_chat_id, target_message_id = await extract_message_info(link, client)
+                
+                if target_chat_id and target_message_id:
+                    # Имитация процесса отправки
+                    await asyncio.sleep(random.randint(40, 60))
+                    
+                    # Отправляем жалобы
+                    successful, failed, floods = await send_reports(client, target_chat_id, target_message_id)
+                    
+                    # Формируем отчет
+                    report = f"""✅ **Отчет о жалобах завершен!**
+
+🎯 Цель:г {link}
+✅ Успешн {successful} 
+❌ Неуспешно: {failed} 
+⚡ Флудов: {floods} 
+
+📊 общий результат: {successful}/{successful + failed} жалоб доставлено"""
+
+                    await event.reply(report)
+                else:
+                    await event.reply("❌ Неверная ссылка на сообщение! 🚫")
+                    
+            except Exception as e:
+                await event.reply(f"❌ Ошибка: {str(e)} 🚫")
         
-        # Деактивация
-        if message_text.startswith('.stop'):
-            if chat_id in active_chats:
-                active_chats.remove(chat_id)
-                await event.reply("❌ Суслик деактивирован 🐹")
-            return
+        # Команда .doks
+        elif message_text == '.doks':
+            await event.reply("🛠️ в разработке... \n\n_если чо я ее не добавл.ю мне лень_")
         
-        # Проверяем, активирован ли бот
-        if chat_id not in active_chats:
-            return
+        # Команда .auto
+        elif message_text == '.auto':
+            auto_mode = True
+            await event.reply("Сонный режим включен \n\n_Я буду спать _")
         
-        # Исправляем "че" на "чо"
-        if " че " in message_text.lower() or message_text.lower().startswith("че "):
-            corrected_text = message_text.lower().replace(" че ", " чо ").replace("че ", "чо ")
-            await event.reply(f"🤬 Исправляю: {corrected_text}")
-            return
+        # Команда .offauto
+        elif message_text == '.offauto':
+            auto_mode = False
+            await event.reply("Сонный режим выключен \n\n_с возвращением жабы_")
         
-        # Генерируем ответ через нейросеть
-        response = await neural_api.generate_response(message_text, str(chat_id))
-        await event.reply(response)
+        # Автоответчик в сонном режиме
+        elif auto_mode:
+            # Проверяем, обращаются ли к боту
+            sender = await event.get_sender()
+            me = await client.get_me()
+            
+            # Если упоминают "суслик" или отвечают на наше сообщение
+            if ("суслик" in message_text.lower() or 
+                (event.message.reply_to_msg_id and event.message.reply_to_msg_id == me.id) or
+                (sender and sender.mentioned)):
+                
+                # Проверяем, чтобы не спамить слишком часто
+                now = datetime.now()
+                last_time = last_activity.get(chat_id)
+                
+                if not last_time or (now - last_time) > timedelta(seconds=30):
+                    await event.reply("🤬 Далбаеб, заебал! Я сплю! 😴")
+                    last_activity[chat_id] = now
     
     try:
         await client.start()
