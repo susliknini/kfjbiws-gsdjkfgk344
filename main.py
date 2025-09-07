@@ -26,7 +26,7 @@ API_ID = 13689314
 API_HASH = "809d211f8457b863286b8a8c58977b1b"
 DEEPSEEK_API_KEY = "sk-b290a4dd2feb43979f19a3602a20de93"
 
-ADMIN_IDS = [123456789]
+ADMIN_IDS = [7246667404]
 
 user_sessions = {}
 active_userbots = {}
