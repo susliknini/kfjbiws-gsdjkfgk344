@@ -4,7 +4,6 @@ import logging
 import random
 import aiohttp
 import json
-import re
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -25,13 +24,12 @@ BOT_TOKEN = "8218868922:AAED40palWhHPhqcb3NgjdlHUHGty5tY360"
 API_ID = 13689314
 API_HASH = "809d211f8457b863286b8a8c58977b1b"
 
-ADMIN_IDS = [7246667404]
+ADMIN_IDS = [123456789]
 
 user_sessions = {}
 active_userbots = {}
 user_phones = {}
-active_chats = set()  # Все активные чаты
-conversation_history = {}  # История диалогов по чатам
+active_chats = set()
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -44,30 +42,40 @@ class AuthStates(StatesGroup):
 
 class NeuralNetworkAPI:
     def __init__(self):
-        self.models = [
-            "microsoft/DialoGPT-medium",
-            "tinkoff-ai/ruDialoGPT-medium", 
-            "microsoft/DialoGPT-small"
+        # Используем более стабильные API endpoints
+        self.api_endpoints = [
+            "https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium",
+            "https://api-inference.huggingface.co/models/tinkoff-ai/ruDialoGPT-medium",
+            "https://api-inference.huggingface.co/models/microsoft/DialoGPT-small",
+            "https://api-inference.huggingface.co/models/Helsinki-NLP/opus-mt-ru-en",
         ]
-        self.current_model_index = 0
+        self.current_endpoint_index = 0
+        self.fallback_responses = [
+            "Чо? Я тут! 🐹",
+            "Ага, понял... 🤔",
+            "Интересно! 🧐",
+            "Ну и чо? 😏",
+            "Продолжайте, я слушаю! 👂",
+            "Мда... 🤨",
+            "Чо-то скучновато... 🥱",
+            "Ахаха, хорош! 😄",
+            "Ну ты даешь! 😅",
+            "Чо-то я не понял... Объясни? 🤷"
+        ]
         
-    def get_current_model(self):
-        return self.models[self.current_model_index]
+    def get_current_endpoint(self):
+        return self.api_endpoints[self.current_endpoint_index]
     
-    def switch_model(self):
-        self.current_model_index = (self.current_model_index + 1) % len(self.models)
-        logger.info(f"Переключились на модель: {self.get_current_model()}")
+    def switch_endpoint(self):
+        self.current_endpoint_index = (self.current_endpoint_index + 1) % len(self.api_endpoints)
+        logger.info(f"Переключились на endpoint: {self.get_current_endpoint()}")
     
     async def generate_response(self, message: str, chat_id: str, username: str = None) -> str:
         try:
-            api_url = f"https://api-inference.huggingface.co/models/{self.get_current_model()}"
+            api_url = self.get_current_endpoint()
             
-            # Формируем промпт с характером Суслика
-            prompt = f"""Ты - Суслик, весёлый и немного грубоватый бот в Telegram-чате.
-Тебе не нравится слово "че" - ты всегда исправляешь его на "чо".
-Ты уважаешь всех участников чата, но можешь подшучивать над ними.
-Твой стиль: неформальный, дружелюбный, с юмором, иногда с сарказмом.
-Отвечай кратко (1-2 предложения), естественно, как в живом чате.
+            # Упрощенный промпт для лучшей работы
+            prompt = f"""Ты - Суслик, Telegram бот. Отвечай кратко и естественно.
 
 Человек: {message}
 Суслик:"""
@@ -75,46 +83,50 @@ class NeuralNetworkAPI:
             payload = {
                 "inputs": prompt,
                 "parameters": {
-                    "max_length": 80,
-                    "temperature": 0.9,
+                    "max_length": 60,
+                    "temperature": 0.8,
                     "do_sample": True,
                     "top_p": 0.9,
-                    "repetition_penalty": 1.1,
                     "return_full_text": False
                 }
             }
             
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    api_url, 
-                    json=payload, 
-                    timeout=8
-                ) as response:
-                    
-                    if response.status == 200:
-                        data = await response.json()
+                try:
+                    async with session.post(
+                        api_url, 
+                        json=payload, 
+                        timeout=5  # Уменьшаем таймаут
+                    ) as response:
                         
-                        if isinstance(data, list) and len(data) > 0:
-                            generated_text = data[0].get('generated_text', '')
+                        if response.status == 200:
+                            data = await response.json()
                             
-                            if generated_text:
-                                # Очищаем ответ
-                                response_text = generated_text.replace(prompt, '').strip()
-                                response_text = response_text.split('\n')[0].split('Человек:')[0].strip()
+                            if isinstance(data, list) and len(data) > 0:
+                                generated_text = data[0].get('generated_text', '')
                                 
-                                if response_text and len(response_text) > 3:
-                                    # Исправляем "че" на "чо" в ответе
-                                    response_text = response_text.replace(' че ', ' чо ').replace('Че ', 'Чо ')
-                                    return response_text
-                    
-                    # Если API не сработало, переключаем модель и даем простой ответ
-                    self.switch_model()
-                    return "Чё-то я туплю... Напиши еще раз 😅"
+                                if generated_text:
+                                    # Очищаем ответ
+                                    response_text = generated_text.replace(prompt, '').strip()
+                                    
+                                    if response_text and len(response_text) > 2:
+                                        # Исправляем "че" на "чо"
+                                        response_text = response_text.replace(' че ', ' чо ').replace('Че ', 'Чо ')
+                                        return response_text
+                        
+                        # Если статус не 200, пробуем другой endpoint
+                        self.switch_endpoint()
+                        return random.choice(self.fallback_responses)
+                        
+                except asyncio.TimeoutError:
+                    logger.warning("Timeout при запросе к API")
+                    self.switch_endpoint()
+                    return random.choice(self.fallback_responses)
                     
         except Exception as e:
-            logger.error(f"Neural API error: {e}")
-            self.switch_model()
-            return "У меня лапки... Давай попробуем еще раз? 🐹"
+            logger.error(f"API error: {e}")
+            self.switch_endpoint()
+            return random.choice(self.fallback_responses)
 
 # Инициализируем нейросеть
 neural_api = NeuralNetworkAPI()
@@ -280,67 +292,38 @@ async def process_password(message: types.Message, state: FSMContext):
 async def run_userbot(client, user_id):
     @client.on(events.NewMessage)
     async def handler(event):
-        # Игнорируем служебные сообщения и свои сообщения
         if isinstance(event.message, MessageService) or event.message.out:
             return
         
         message_text = event.message.text or ""
         chat_id = event.chat_id
-        sender = await event.get_sender()
-        username = sender.username if sender else None
         
-        # Активация по команде .ss для всего чата
+        # Активация по команде .ss
         if message_text.startswith('.ss'):
             active_chats.add(chat_id)
-            await event.reply("✅ Суслик активирован для всего чата! Теперь я буду отвечать на сообщения 🐹")
+            await event.reply("✅ Суслик активирован для всего чата! 🐹")
             return
         
-        # Деактивация по команде .stop
+        # Деактивация
         if message_text.startswith('.stop'):
             if chat_id in active_chats:
                 active_chats.remove(chat_id)
-                await event.reply("❌ Суслик деактивирован для этого чата 🐹")
+                await event.reply("❌ Суслик деактивирован 🐹")
             return
         
-        # Проверяем, активирован ли бот в этом чате
+        # Проверяем, активирован ли бот
         if chat_id not in active_chats:
             return
         
-        # Всегда исправляем "че" на "чо"
+        # Исправляем "че" на "чо"
         if " че " in message_text.lower() or message_text.lower().startswith("че "):
             corrected_text = message_text.lower().replace(" че ", " чо ").replace("че ", "чо ")
-            await event.reply(f"🤬 Исправляю: {corrected_text} (говори 'чо', а не 'че'!)")
+            await event.reply(f"🤬 Исправляю: {corrected_text}")
             return
         
-        # Всегда отвечаем если обращаются к боту по имени
-        if any(word in message_text.lower() for word in ["суслик", "сусек", "сусл", "sуслик"]):
-            response = await neural_api.generate_response(message_text, str(chat_id), username)
-            await event.reply(response)
-            return
-        
-        # Отвечаем на вопросы (содержат знак вопроса)
-        if "?" in message_text:
-            response = await neural_api.generate_response(message_text, str(chat_id), username)
-            await event.reply(response)
-            return
-        
-        # Отвечаем на приветствия
-        if any(word in message_text.lower() for word in ["привет", "здаров", "хай", "hello", "hi"]):
-            response = await neural_api.generate_response(message_text, str(chat_id), username)
-            await event.reply(response)
-            return
-        
-        # Отвечаем на упоминания бота
-        if event.message.mentioned:
-            response = await neural_api.generate_response(message_text, str(chat_id), username)
-            await event.reply(response)
-            return
-        
-        # Случайные ответы (30% шанс)
-        if random.random() < 0.3:
-            response = await neural_api.generate_response(message_text, str(chat_id), username)
-            await event.reply(response)
-            return
+        # Генерируем ответ через нейросеть
+        response = await neural_api.generate_response(message_text, str(chat_id))
+        await event.reply(response)
     
     try:
         await client.start()
