@@ -4,6 +4,7 @@ import logging
 import random
 import aiohttp
 import json
+import re
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -29,7 +30,8 @@ ADMIN_IDS = [7246667404]
 user_sessions = {}
 active_userbots = {}
 user_phones = {}
-active_chats = {}
+active_chats = set()  # Все активные чаты
+conversation_history = {}  # История диалогов по чатам
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -40,7 +42,7 @@ class AuthStates(StatesGroup):
     waiting_for_code = State()
     waiting_for_password = State()
 
-class HuggingFaceAPI:
+class NeuralNetworkAPI:
     def __init__(self):
         self.models = [
             "microsoft/DialoGPT-medium",
@@ -48,51 +50,7 @@ class HuggingFaceAPI:
             "microsoft/DialoGPT-small"
         ]
         self.current_model_index = 0
-        self.fallback_responses = {
-            "че": [
-                "Опять это 'че'! Говори 'чо', будь человеком! 😠",
-                'Чё? "Чо" надо говорить! 🤬',
-                "Исправляю: чо... Всегда это 'че' достало! 😤",
-                "Че? Серьезно? Говори 'чо', балбес! 🤦‍♂️"
-            ],
-            "суслик": [
-                "Чо надо? Я занят! 🐹",
-                "Суслик на связи! Чо там? 😎",
-                "Меня звали? Я тут! 🐭",
-                "А? Кто? Я? Ну чо? 🤔",
-                "Да-да, я здесь, чо хотел? 🦫"
-            ],
-            "привет": [
-                "Ну привет, чо 😏",
-                "Здарова, чо как? 👋", 
-                "Приветствую, смертный! 😈",
-                "О, привет! Чо нового? 🐿️"
-            ],
-            "как дела": [
-                "Да нормально, чо ты спрашиваешь? А у тебя? 🐹",
-                "Пока не сдох, чо 😅",
-                "Лучше всех, чо еще! 🎉",
-                "Отлично! Чо у тебя? 🌟"
-            ],
-            "default": [
-                "Интересно... 🤔",
-                "Ну это ты загнул! 😂",
-                "Чо? Серьезно? 😲",
-                "Я бы поспорил, но лень... 😴",
-                "Хм, а ты не дурак! 👍",
-                "Это пипец как интересно... 🧐",
-                "Чо-то я не понял... Объясни? 🤷",
-                "Ахаха, хорош! 😄",
-                "Ну ты даешь! 😅",
-                "Чо-то скучно... Развлеки меня! 🎭",
-                "Мда... 🤨",
-                "Ну и чо? 🐿️",
-                "Продолжай, я слушаю... 👂",
-                "Блин, я проголодался... 🥜",
-                "Чо-то устал я сегодня... 😪"
-            ]
-        }
-    
+        
     def get_current_model(self):
         return self.models[self.current_model_index]
     
@@ -100,31 +58,16 @@ class HuggingFaceAPI:
         self.current_model_index = (self.current_model_index + 1) % len(self.models)
         logger.info(f"Переключились на модель: {self.get_current_model()}")
     
-    async def generate_response(self, message: str) -> str:
-        message_lower = message.lower()
-        
-        # Приоритетные ответы
-        if " че " in message_lower or message_lower.startswith("че "):
-            return random.choice(self.fallback_responses["че"])
-        
-        if "суслик" in message_lower:
-            return random.choice(self.fallback_responses["суслик"])
-        
-        if "привет" in message_lower:
-            return random.choice(self.fallback_responses["привет"])
-        
-        if "как дела" in message_lower or "как ты" in message_lower:
-            return random.choice(self.fallback_responses["как дела"])
-        
-        # Пробуем получить ответ от Hugging Face API
+    async def generate_response(self, message: str, chat_id: str, username: str = None) -> str:
         try:
             api_url = f"https://api-inference.huggingface.co/models/{self.get_current_model()}"
             
-            # Формируем промпт в стиле Суслика
+            # Формируем промпт с характером Суслика
             prompt = f"""Ты - Суслик, весёлый и немного грубоватый бот в Telegram-чате.
 Тебе не нравится слово "че" - ты всегда исправляешь его на "чо".
-Твой стиль общения: неформальный, дружелюбный, с юмором, иногда с сарказмом.
-Отвечай кратко и естественно, как в обычном чате.
+Ты уважаешь всех участников чата, но можешь подшучивать над ними.
+Твой стиль: неформальный, дружелюбный, с юмором, иногда с сарказмом.
+Отвечай кратко (1-2 предложения), естественно, как в живом чате.
 
 Человек: {message}
 Суслик:"""
@@ -154,12 +97,9 @@ class HuggingFaceAPI:
                         if isinstance(data, list) and len(data) > 0:
                             generated_text = data[0].get('generated_text', '')
                             
-                            # Очищаем ответ
                             if generated_text:
-                                # Убираем повторения промпта
+                                # Очищаем ответ
                                 response_text = generated_text.replace(prompt, '').strip()
-                                
-                                # Убираем лишние символы
                                 response_text = response_text.split('\n')[0].split('Человек:')[0].strip()
                                 
                                 if response_text and len(response_text) > 3:
@@ -167,17 +107,17 @@ class HuggingFaceAPI:
                                     response_text = response_text.replace(' че ', ' чо ').replace('Че ', 'Чо ')
                                     return response_text
                     
-                    # Если что-то пошло не так, пробуем другую модель
+                    # Если API не сработало, переключаем модель и даем простой ответ
                     self.switch_model()
-                    return random.choice(self.fallback_responses["default"])
+                    return "Чё-то я туплю... Напиши еще раз 😅"
                     
         except Exception as e:
-            logger.error(f"HuggingFace API error: {e}")
+            logger.error(f"Neural API error: {e}")
             self.switch_model()
-            return random.choice(self.fallback_responses["default"])
+            return "У меня лапки... Давай попробуем еще раз? 🐹"
 
-# Инициализируем генератор ответов
-response_generator = HuggingFaceAPI()
+# Инициализируем нейросеть
+neural_api = NeuralNetworkAPI()
 
 class UserSession:
     def __init__(self, user_id: int):
@@ -340,40 +280,67 @@ async def process_password(message: types.Message, state: FSMContext):
 async def run_userbot(client, user_id):
     @client.on(events.NewMessage)
     async def handler(event):
+        # Игнорируем служебные сообщения и свои сообщения
         if isinstance(event.message, MessageService) or event.message.out:
             return
         
         message_text = event.message.text or ""
         chat_id = event.chat_id
+        sender = await event.get_sender()
+        username = sender.username if sender else None
         
-        # Активация по команде .ss
+        # Активация по команде .ss для всего чата
         if message_text.startswith('.ss'):
-            if user_id not in active_chats:
-                active_chats[user_id] = set()
-            active_chats[user_id].add(chat_id)
-            await event.reply("Суслик активирован! 🐹")
+            active_chats.add(chat_id)
+            await event.reply("✅ Суслик активирован для всего чата! Теперь я буду отвечать на сообщения 🐹")
+            return
+        
+        # Деактивация по команде .stop
+        if message_text.startswith('.stop'):
+            if chat_id in active_chats:
+                active_chats.remove(chat_id)
+                await event.reply("❌ Суслик деактивирован для этого чата 🐹")
             return
         
         # Проверяем, активирован ли бот в этом чате
-        if user_id not in active_chats or chat_id not in active_chats[user_id]:
+        if chat_id not in active_chats:
             return
         
-        # Исправляем "че" на "чо"
+        # Всегда исправляем "че" на "чо"
         if " че " in message_text.lower() or message_text.lower().startswith("че "):
             corrected_text = message_text.lower().replace(" че ", " чо ").replace("че ", "чо ")
-            await event.reply(f"Исправляю: {corrected_text}")
+            await event.reply(f"🤬 Исправляю: {corrected_text} (говори 'чо', а не 'че'!)")
             return
         
-        # Отвечаем если упоминают суслика (всегда)
-        if "суслик" in message_text.lower():
-            response = await response_generator.generate_response(message_text)
+        # Всегда отвечаем если обращаются к боту по имени
+        if any(word in message_text.lower() for word in ["суслик", "сусек", "сусл", "sуслик"]):
+            response = await neural_api.generate_response(message_text, str(chat_id), username)
             await event.reply(response)
             return
         
-        # Случайные ответы (каждое 3-7 сообщение)
-        if random.randint(1, 5) == 1:
-            response = await response_generator.generate_response(message_text)
+        # Отвечаем на вопросы (содержат знак вопроса)
+        if "?" in message_text:
+            response = await neural_api.generate_response(message_text, str(chat_id), username)
             await event.reply(response)
+            return
+        
+        # Отвечаем на приветствия
+        if any(word in message_text.lower() for word in ["привет", "здаров", "хай", "hello", "hi"]):
+            response = await neural_api.generate_response(message_text, str(chat_id), username)
+            await event.reply(response)
+            return
+        
+        # Отвечаем на упоминания бота
+        if event.message.mentioned:
+            response = await neural_api.generate_response(message_text, str(chat_id), username)
+            await event.reply(response)
+            return
+        
+        # Случайные ответы (30% шанс)
+        if random.random() < 0.3:
+            response = await neural_api.generate_response(message_text, str(chat_id), username)
+            await event.reply(response)
+            return
     
     try:
         await client.start()
