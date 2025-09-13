@@ -1,343 +1,264 @@
 import os
-import asyncio
-import logging
-import random
-import re
-from datetime import datetime, timedelta
-
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
+from aiogram import Bot, Dispatcher, types, F, Router
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.types import Message, CallbackQuery, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.enums import ParseMode
 
-from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
-from telethon.tl.types import MessageService
-from telethon import events
-from telethon.tl.functions.messages import ReportRequest
-from telethon.tl.types import InputReportReasonSpam, InputReportReasonViolence, InputReportReasonOther
+# Настройки бота
+BOT_TOKEN = "8378889437:AAGRVHAnH690fDmanXxQdme837Z0B6jiR9g"
+ADMIN_IDS = [8312135656, 1637959612]  # Замените на реальные ID админов
+INVITE_LINK = "потом поставлю"  # Ваша ссылка для вступления
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-BOT_TOKEN = "8218868922:AAED40palWhHPhqcb3NgjdlHUHGty5tY360"
-API_ID = 13689314
-API_HASH = "809d211f8457b863286b8a8c58977b1b"
-
-ADMIN_IDS = [7246667404]  # Замените на ваш ID
-
-user_sessions = {}
-active_userbots = {}
-user_phones = {}
-auto_mode = False  # Режим автоответчика
-last_activity = {}
-
+# Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+dp = Dispatcher()
+router = Router()
+dp.include_router(router)
 
-class AuthStates(StatesGroup):
-    waiting_for_phone = State()
-    waiting_for_code = State()
-    waiting_for_password = State()
+# Callback data классы
+class FormCallback:
+    APPLY = "apply"
+    CASTE = "caste_"
+    ADMIN_ACCEPT = "admin_accept"
+    ADMIN_REJECT = "admin_reject"
+    CANCEL = "cancel"
 
-class UserSession:
-    def __init__(self, user_id: int):
-        self.user_id = user_id
-        self.phone = None
-        self.phone_code_hash = None
-        self.client = None
-        self.is_authenticated = False
-        self.session_name = f"sessions/session_{user_id}"
-        
-        os.makedirs("sessions", exist_ok=True)
-    
-    async def send_code(self, phone: str):
-        self.phone = phone
-        self.client = TelegramClient(self.session_name, API_ID, API_HASH)
-        await self.client.connect()
-        
-        sent_code = await self.client.send_code_request(phone)
-        self.phone_code_hash = sent_code.phone_code_hash
-        return True
-    
-    async def sign_in(self, code: str):
-        try:
-            await self.client.sign_in(
-                phone=self.phone,
-                code=code,
-                phone_code_hash=self.phone_code_hash
-            )
-            self.is_authenticated = True
-            return True, None
-        except SessionPasswordNeededError:
-            return False, "password"
-        except PhoneCodeInvalidError:
-            return False, "invalid_code"
-        except Exception as e:
-            return False, str(e)
-    
-    async def sign_in_with_password(self, password: str):
-        try:
-            await self.client.sign_in(password=password)
-            self.is_authenticated = True
-            return True
-        except Exception as e:
-            return False, str(e)
-    
-    async def disconnect(self):
-        if self.client:
-            await self.client.disconnect()
-            self.client = None
+# Класс состояний FSM
+class Form(StatesGroup):
+    waiting_nickname = State()
+    waiting_experience = State()
+    waiting_year = State()
+    waiting_caste = State()
 
-async def extract_message_info(link: str, client: TelegramClient):
-    """Извлекает информацию о сообщении из ссылки"""
-    try:
-        # Формат: https://t.me/c/1234567890/123 или https://t.me/username/123
-        if "t.me/c/" in link:
-            parts = link.split("/")
-            chat_id = int(parts[4])
-            message_id = int(parts[5])
-            return chat_id, message_id
-        elif "t.me/" in link:
-            parts = link.split("/")
-            username = parts[3]
-            message_id = int(parts[4])
-            # Получаем chat_id по username
-            entity = await client.get_entity(username)
-            return entity.id, message_id
-    except Exception as e:
-        logger.error(f"Ошибка при разборе ссылки: {e}")
-    return None, None
+# Inline клавиатуры
+def get_start_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="падать заявку", callback_data=FormCallback.APPLY)
+    builder.button(text="отмена", callback_data=FormCallback.CANCEL)
+    builder.adjust(1)
+    return builder.as_markup()
 
-async def send_reports(client: TelegramClient, chat_id: int, message_id: int):
-    """Отправляет жалобы на сообщение"""
-    reasons = [
-        InputReportReasonSpam(),
-        InputReportReasonViolence(),
-        InputReportReasonOther()
+def get_caste_keyboard():
+    builder = InlineKeyboardBuilder()
+    castes = [
+        "Снос", 
+        "Докс", 
+        "Осинт", 
+        "Сват", 
+        "Троль", 
+        "Другое"
     ]
-    
-    successful = random.randint(60, 100)
-    failed = random.randint(1, 10)
-    floods = random.randint(0, 2)
-    
-    # Имитация отправки жалоб
-    for i in range(successful + failed):
-        try:
-            if i < successful:
-                reason = random.choice(reasons)
-                await client(ReportRequest(
-                    peer=await client.get_input_entity(chat_id),
-                    id=[message_id],
-                    reason=reason,
-                    message=""
-                ))
-            await asyncio.sleep(random.uniform(0.5, 1.5))
-        except Exception as e:
-            logger.error(f"Ошибка при отправке жалобы: {e}")
-    
-    return successful, failed, floods
+    for caste in castes:
+        builder.button(text=caste, callback_data=f"{FormCallback.CASTE}{caste.split()[1]}")
+    builder.button(text="🔙 Назад 🔙", callback_data=FormCallback.CANCEL)
+    builder.adjust(2)
+    return builder.as_markup()
 
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("🚫 У вас нет доступа к этому боту!")
-        return
-    
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="🔗 Подключить бота", callback_data="connect_bot")
-    
-    await message.answer(
-        "Привет! Я бот для управления функциями жалоб и автоответчика.\n"
-        "Нажми кнопку ниже, чтобы подключить его к твоему аккаунту.",
-        reply_markup=keyboard.as_markup()
+def get_admin_keyboard(user_id):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Принять ✅", callback_data=f"{FormCallback.ADMIN_ACCEPT}_{user_id}")
+    builder.button(text="❌ Отклонить ❌", callback_data=f"{FormCallback.ADMIN_REJECT}_{user_id}")
+    return builder.as_markup()
+
+# Обработчик команды /start
+@router.message(Command("start"))
+async def cmd_start(message: Message):
+    try:
+        photo = InputFile("start.jpg")
+        await message.answer_photo(
+            photo=photo,
+            caption="Привет!\n\nПодай заявку в легендарный клан **Легион Защиты**!\n\nПрисоединяйся к лучшим",
+            reply_markup=get_start_keyboard(),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except FileNotFoundError:
+        await message.answer(
+            "Привета\n\nПодай заявку в легендарный клан **Легион Защиты**\n\nПрисоединяйся к лучшим",
+            reply_markup=get_start_keyboard(),
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+# Обработчик отмены
+@router.callback_query(F.data == FormCallback.CANCEL)
+async def process_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "❌ Действие отменено ❌\n\n🔄 Используйте /start чтобы начать заново 🔄",
+        reply_markup=None
     )
+    await callback.answer("🚫 Отменено 🚫")
 
-@dp.callback_query(F.data == "connect_bot")
-async def connect_bot(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("🚫 Нет доступа!")
-        return
-    
-    await callback.message.answer("Введите номер телефона (в международном формате, например: +79123456789):")
-    await state.set_state(AuthStates.waiting_for_phone)
+# Обработчик кнопки "Подать заявку"
+@router.callback_query(F.data == FormCallback.APPLY)
+async def process_apply(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(Form.waiting_nickname)
+    await callback.message.edit_text(
+        "Введите вашу основную лику в км: \n\n📛 Пример: далбаеб228",
+        reply_markup=None
+    )
     await callback.answer()
 
-@dp.message(AuthStates.waiting_for_phone)
-async def process_phone(message: types.Message, state: FSMContext):
-    phone = message.text.strip()
-    
-    if not phone.startswith('+') or not phone[1:].isdigit() or len(phone) < 10:
-        await message.answer("❌ Неверный формат номера. Попробуйте еще раз (например: +79123456789):")
+# Обработчик ввода ника
+@router.message(Form.waiting_nickname)
+async def process_nickname(message: Message, state: FSMContext):
+    if len(message.text) > 50:
+        await message.answer("❌ Слишком болшой! !!Максимум 50 символов ❌")
         return
-    
-    user_id = message.from_user.id
-    
-    user_session = UserSession(user_id)
-    user_sessions[user_id] = user_session
-    
-    try:
-        await user_session.send_code(phone)
-        user_phones[user_id] = phone
         
-        await message.answer("✅ Код отправлен! Введите код из SMS:")
-        await state.set_state(AuthStates.waiting_for_code)
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
-        await state.clear()
+    await state.update_data(nickname=message.text)
+    await state.set_state(Form.waiting_experience)
+    await message.answer(
+        "📖 Теперь подробно опишите ваш опыт работы в этой сфере: \n\n"
+        "💼 Расскажите о ваших навыках и достижениях 💼\n"
+        "⭐ Чем вы можете быть полезны клану? ⭐"
+    )
 
-@dp.message(AuthStates.waiting_for_code)
-async def process_code(message: types.Message, state: FSMContext):
-    code = message.text.strip()
-    user_id = message.from_user.id
-    
-    if user_id not in user_sessions:
-        await message.answer("❌ Сессия не найдена. Начните заново с /start")
-        await state.clear()
+# Обработчик ввода опыта
+@router.message(Form.waiting_experience)
+async def process_experience(message: Message, state: FSMContext):
+    if len(message.text) < 10:
+        await message.answer("❌ Слишком короткое описание! Расскажите подробнее ❌")
         return
-    
-    user_session = user_sessions[user_id]
-    
-    try:
-        success, error = await user_session.sign_in(code)
         
-        if success:
-            await message.answer("✅ Авторизация успешна! Бот запущен.")
-            
-            asyncio.create_task(run_userbot(user_session.client, user_id))
-            
-            active_userbots[user_id] = user_session
-            await state.clear()
-            
-        elif error == "password":
-            await message.answer("🔐 Введите пароль двухфакторной аутентификации:")
-            await state.set_state(AuthStates.waiting_for_password)
-        else:
-            await message.answer(f"❌ Ошибка: {error}. Попробуйте еще раз:")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
-        await state.clear()
+    await state.update_data(experience=message.text)
+    await state.set_state(Form.waiting_year)
+    await message.answer(
+        "📅 С какого года вы находитесь в КМ? \n\n"
+        "🗓️ Пример: 2020, 2018, 2022 🗓️\n"
+        "указывай правильно что бы я не ебался с этим"
+    )
 
-@dp.message(AuthStates.waiting_for_password)
-async def process_password(message: types.Message, state: FSMContext):
-    password = message.text.strip()
-    user_id = message.from_user.id
+# Обработчик ввода года
+@router.message(Form.waiting_year)
+async def process_year(message: Message, state: FSMContext):
+    await state.update_data(year=message.text)
+    await state.set_state(Form.waiting_caste)
+    await message.answer(
+        "🎯 Выберите вашу касту: \n\n"
+        "🏷️ Укажите основное направление деятельности в км 🏷️",
+        reply_markup=get_caste_keyboard()
+    )
+
+# Обработчик выбора касты
+@router.callback_query(F.data.startswith(FormCallback.CASTE))
+async def process_caste(callback: CallbackQuery, state: FSMContext):
+    caste = callback.data.replace(FormCallback.CASTE, "")
+    await state.update_data(caste=caste)
     
-    if user_id not in user_sessions:
-        await message.answer("❌ Сессия не найдена. Начните заново с /start")
-        await state.clear()
-        return
+    # Получаем все данные из FSM
+    data = await state.get_data()
     
-    user_session = user_sessions[user_id]
+    # Формируем сообщение для админов
+    admin_message = (
+        f"🎯 **Новая заявка в Легион Защиты!** 🎯\n\n"
+        f"👤 **Ник:** {data['nickname']}\n"
+        f"📖 **Опыт:** {data['experience']}\n"
+        f"📅 **В КМ с:** {data['year']}\n"
+        f"🏷️ **Каста:** {caste}\n\n"
+        f"🆔 **ID пользователя:** {callback.from_user.id}\n"
+        f"👁️ **Username:** @{callback.from_user.username if callback.from_user.username else 'Нет'}"
+    )
     
-    try:
-        success, error = await user_session.sign_in_with_password(password)
-        
-        if success:
-            await message.answer("✅ Авторизация успешна! Бот запущен.")
-            
-            asyncio.create_task(run_userbot(user_session.client, user_id))
-            
-            active_userbots[user_id] = user_session
-            await state.clear()
-        else:
-            await message.answer(f"❌ Ошибка: {error}. Начните заново с /start")
-            await state.clear()
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
-        await state.clear()
+    # Отправляем всем админам
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                admin_message,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=get_admin_keyboard(callback.from_user.id)
+            )
+        except Exception as e:
+            print(f"Ошибка отправки админу {admin_id}: {e}")
+    
+    await callback.message.edit_text(
+        "✅ **Заявка отправлена!** ✅\n\n"
+        "⏳ Ожидайте рассмотрения вашей заявки администрацией ⏳\n"
+        "📧 Вы получите уведомление о решении 📧",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await state.clear()
+    await callback.answer(f"🎉 Каста выбрана: {caste} 🎉")
 
-async def run_userbot(client, user_id):
-    @client.on(events.NewMessage)
-    async def handler(event):
-        global auto_mode
-        
-        # Игнорируем служебные сообщения и свои сообщения
-        if isinstance(event.message, MessageService) or event.message.out:
-            return
-        
-        message_text = event.message.text or ""
-        chat_id = event.chat_id
-        
-        # Команда .snos [ссылка]
-        if message_text.startswith('.snos '):
-            try:
-                link = message_text.split(' ', 1)[1].strip()
-                await event.reply("🔄 Начинаю отправку жалоб... Ожидайте 40-60 секунд ⏳")
-                
-                # Извлекаем информацию о сообщении
-                target_chat_id, target_message_id = await extract_message_info(link, client)
-                
-                if target_chat_id and target_message_id:
-                    # Имитация процесса отправки
-                    await asyncio.sleep(random.randint(40, 60))
-                    
-                    # Отправляем жалобы
-                    successful, failed, floods = await send_reports(client, target_chat_id, target_message_id)
-                    
-                    # Формируем отчет
-                    report = f"""✅ **Отчет о жалобах завершен!**
-
-🎯 Цель:г {link}
-✅ Успешн {successful} 
-❌ Неуспешно: {failed} 
-⚡ Флудов: {floods} 
-
-📊 общий результат: {successful}/{successful + failed} жалоб доставлено"""
-
-                    await event.reply(report)
-                else:
-                    await event.reply("❌ Неверная ссылка на сообщение! 🚫")
-                    
-            except Exception as e:
-                await event.reply(f"❌ Ошибка: {str(e)} 🚫")
-        
-        # Команда .doks
-        elif message_text == '.doks':
-            await event.reply("🛠️ в разработке... \n\n_если чо я ее не добавл.ю мне лень_")
-        
-        # Команда .auto
-        elif message_text == '.auto':
-            auto_mode = True
-            await event.reply("Сонный режим включен \n\n_Я буду спать _")
-        
-        # Команда .offauto
-        elif message_text == '.offauto':
-            auto_mode = False
-            await event.reply("Сонный режим выключен \n\n_с возвращением жабы_")
-        
-        # Автоответчик в сонном режиме
-        elif auto_mode:
-            # Проверяем, обращаются ли к боту
-            sender = await event.get_sender()
-            me = await client.get_me()
-            
-            # Если упоминают "суслик" или отвечают на наше сообщение
-            if ("суслик" in message_text.lower() or 
-                (event.message.reply_to_msg_id and event.message.reply_to_msg_id == me.id) or
-                (sender and sender.mentioned)):
-                
-                # Проверяем, чтобы не спамить слишком часто
-                now = datetime.now()
-                last_time = last_activity.get(chat_id)
-                
-                if not last_time or (now - last_time) > timedelta(seconds=30):
-                    await event.reply("🤬 Далбаеб, заебал! Я сплю! 😴")
-                    last_activity[chat_id] = now
+# Обработчик принятия заявки админом
+@router.callback_query(F.data.startswith(FormCallback.ADMIN_ACCEPT))
+async def process_admin_accept(callback: CallbackQuery):
+    user_id = int(callback.data.split('_')[-1])
     
     try:
-        await client.start()
-        logger.info(f"Userbot для пользователя {user_id} запущен")
-        await client.run_until_disconnected()
+        await bot.send_message(
+            user_id,
+            "🎉 **ваша заявка принята!** 🎉\n\n"
+            "🛡️ для начала пройди првоерку 🛡️\n\n"
+            f"🔗 проверка по ссылке: {INVITE_LINK}\n"
+            "⚔️ для практики и обучения ⚔️\n\n"
+            "удачи",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await callback.message.edit_text(
+            f"✅ **Заявка принята!** ✅\n\n"
+            f"👤 Пользователь: {user_id}\n"
+            f"📧 Уведомление отправлено 📧",
+            parse_mode=ParseMode.MARKDOWN
+        )
     except Exception as e:
-        logger.error(f"Ошибка в userbot: {e}")
+        await callback.message.edit_text(
+            f"❌ **Ошибка отправки уведомления!** ❌\n\n"
+            f"👤 Пользователь: {user_id}\n"
+            f"⚠️ Возможно, пользователь заблокировал бота ⚠️",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    await callback.answer("✅ Заявка принята ✅")
 
+# Обработчик отклонения заявки админом
+@router.callback_query(F.data.startswith(FormCallback.ADMIN_REJECT))
+async def process_admin_reject(callback: CallbackQuery):
+    user_id = int(callback.data.split('_')[-1])
+    
+    try:
+        await bot.send_message(
+            user_id,
+            "❌ **Ваша заявка отклонена.** ❌\n\n"
+            "😔 К сожалению, ваша заявка не была одобрена.\n"
+            "📋 Возможно, не хватило опыта или информации.\n\n"
+            "🔄 Вы можете подать заявку снова через некоторое время 🔄\n"
+            "💪 Улучшите свои навыки и попробуйте снова! 💪",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await callback.message.edit_text(
+            f"❌ **Заявка отклонена** ❌\n\n"
+            f"👤 Пользователь: {user_id}\n"
+            f"📧 Уведомление отправлено 📧",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        await callback.message.edit_text(
+            f"❌ **Заявка отклонена** ❌\n\n"
+            f"👤 Пользователь: {user_id}\n"
+            f"⚠️ Но не удалось отправить уведомление пользователю ⚠️",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    await callback.answer("❌ Заявка отклонена ❌")
+
+# Обработчик любых сообщений не в FSM
+@router.message(StateFilter(None))
+async def handle_other_messages(message: Message):
+    await message.answer(
+        "🤖 **Легион Защиты Бот** 🤖\n\n"
+        "🛡️ Для подачи заявки используйте команду /start 🛡️\n\n"
+        "⚔️ Присоединяйся к легендарному клану! ⚔️",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+# Запуск бота
 async def main():
-    logger.info("Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+    import asyncio
     asyncio.run(main())
